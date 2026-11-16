@@ -1,7 +1,7 @@
 /**
  * @file src/features/selection-translation/core.ts
  * 文件职责：集中划词翻译的纯交互与内容算法，包括请求代次、词典回退、触发展示状态、选区过滤、上下文摘要、弹窗锚点和语音语言规范化。
- * 主要内容：定义 SelectionRequestTokenGate、Presentation 状态机、选区/视口类型，处理中英划词反向目标、同语种判断、文本清理、公式单份文本提取、正文中的行内代码片段保护、主动代码选区提取、文档根禁译外壳放行、同一编辑区内显式选区放行、按实际 Range 边界遍历的敏感区域排除、无文本装饰图标放行及单遍祖先保护检查（不扫描未选中的共同祖先子树）、多矩形选择与完整选区避让、按页面缩放补偿并在空间不足时约束高度的弹窗定位及仅用于朗读的普通话语言别名。
+ * 主要内容：定义 SelectionRequestTokenGate、Presentation 状态机、选区/视口类型，处理中英划词反向目标、同语种判断、文本清理、公式单份文本提取、正文中的行内代码片段保护、主动代码选区提取、文档根禁译外壳放行、同一编辑区及飞书文档分块内显式选区放行、按实际 Range 边界遍历的敏感区域排除、无文本装饰图标放行及单遍祖先保护检查（不扫描未选中的共同祖先子树）、多矩形选择与完整选区避让、按页面缩放补偿并在空间不足时约束高度的弹窗定位及仅用于朗读的普通话语言别名。
  * 模块边界：本模块不监听 document selection、不发消息、不渲染 Vue 或播放音频；组件负责连接 DOM，词典和 TTS 由 services/background 提供，函数保持确定性以供单元测试。DOM 安全判断直接复用 translation/dom 的同一实现，不初始化翻译候选或站点规则 registry。
  */
 import {getElementTagName, isDocumentSurfaceNoTranslateShell, isTopLevelApplicationShell} from '@/src/core/translation/dom';
@@ -371,7 +371,8 @@ function isSelectionExcludedElement(element: Element | null, editableRoot: Eleme
         // DeepSeek 等页面在 html/body 上禁止浏览器整页翻译；显式划词仍可读取正文。
         // 文档根禁译标记可放行；UI、隐藏、本地禁译标记和授权编辑宿主之外的编辑边界仍逐层检查。
         const shell = isDocumentSurfaceNoTranslateShell(excluded) ||
-            excluded !== element && isTopLevelApplicationShell(excluded);
+            excluded !== element && isTopLevelApplicationShell(excluded) ||
+            isFeishuEditorSelectionShell(excluded, editableRoot);
         if ((!shell && !isAllowedEditableSelectionMarker(excluded, editableRoot))
             || isSelectionNonMarkerExcluded(excluded, editableRoot)) return true;
         excluded = excluded.parentElement?.closest(selectionExcludedSelector) ?? null;
@@ -426,14 +427,38 @@ function isAllowedEditableSelectionMarker(element: Element, root: Element | null
     const editable = element.getAttribute('contenteditable');
     return !(editable !== null && editable.trim().toLowerCase() === 'false')
         && !element.matches(selectionProtectedMarkerSelector)
-        && !element.matches('.notranslate,[translate="no"],[data-notranslate="true"]');
+        && (!element.matches('.notranslate,[translate="no"],[data-notranslate="true"]')
+            || isFeishuEditorSelectionShell(element, root));
 }
 
 function isSelectionNonMarkerExcluded(element: Element, root: Element | null): boolean {
     return element.matches(selectionNonMarkerExcludedSelector) && !isAllowedEditableSelectionMarker(element, root);
 }
 
+const feishuDocumentUrl = /^https:\/\/(?:[a-z0-9-]+\.)*(?:feishu\.cn|larkoffice\.com|larksuite\.com)\/(?:docx?|docs|wiki)\//i;
+const feishuDocumentRootSelector = '.bear-web-x-container, .docx-page-block';
+
+/** 飞书正文以多个 Slate 宿主组成同一文档；仅显式划词共享正文边界，不改变宿主或全文翻译规则。 */
+function getFeishuDocumentSelectionRoot(range: Range): Element | null {
+    if (!feishuDocumentUrl.test(range.startContainer.ownerDocument?.URL ?? '')) return null;
+    const rootFor = (node: Node) => {
+        const element = elementFromSelectionNode(node);
+        return element?.closest('.bear-web-x-container') ?? element?.closest('.docx-page-block') ?? null;
+    };
+    const start = rootFor(range.startContainer);
+    return start && start === rootFor(range.endContainer) ? start : null;
+}
+
+/** 编辑器自身的禁译标记用于保护排版；正文内局部禁译、隐藏、控件与扩展 UI 仍由原守卫排除。 */
+function isFeishuEditorSelectionShell(element: Element, root: Element | null): boolean {
+    return Boolean(root && feishuDocumentUrl.test(root.ownerDocument.URL)
+        && root.matches(feishuDocumentRootSelector) && isWithinEditableSelectionRoot(element, root)
+        && (element === root || element.matches('.docx-page-block, .zone-container[data-slate-editor="true"]')));
+}
+
 function getSharedEditableSelectionRoot(range: Range): Element | null {
+    const documentRoot = getFeishuDocumentSelectionRoot(range);
+    if (documentRoot) return documentRoot;
     const start = getEditableSelectionRoot(range.startContainer);
     return start && start === getEditableSelectionRoot(range.endContainer) ? start : null;
 }
@@ -530,7 +555,8 @@ export function shouldIgnoreSelection(range: Range, allowEditableSelection = fal
             try {
                 if (!isIntrinsicallyExcludedSelectionElement(element, editableRoot) &&
                     (isDocumentSurfaceNoTranslateShell(element) || isTopLevelApplicationShell(element)
-                        || isAllowedEditableSelectionMarker(element, editableRoot)) &&
+                        || isAllowedEditableSelectionMarker(element, editableRoot)
+                        || isFeishuEditorSelectionShell(element, editableRoot)) &&
                     !isSelectionNonMarkerExcluded(element, editableRoot)) continue;
                 if (!isSelectionExcludedElement(element, editableRoot)) continue;
                 if (isInlineSelectionFormulaPart(element)) continue;

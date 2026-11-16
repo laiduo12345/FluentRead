@@ -2784,6 +2784,63 @@ describe('editable text selection capture', () => {
     });
 });
 
+describe('selection without native geometry', () => {
+    function prepare() {
+        const fixture = mountSelection();
+        Object.assign(fixture.config, {selectionTranslatorTrigger: 'icon', selectionTranslatorDelay: 0});
+        fixture.notifyConfig();
+        const selected = fixture.selectedSnapshot('Good ideas deserve careful attention.');
+        const zero = {left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0};
+        selected.range.getClientRects = () => [];
+        selected.range.getBoundingClientRect = () => zero;
+        const pointer = {isTrusted: true, button: 0, pointerType: 'mouse', target: selected.range.startContainer.parentElement,
+            clientX: 210, clientY: 180};
+        return {...fixture, selected, pointer};
+    }
+
+    it('positions a validated selection at the trusted mouse release and translates only after the user opens it', async () => {
+        const x = prepare();
+        expect(x.state.readSelectionSnapshot()).toBeNull();
+        x.state.handlePointerDown(x.pointer);
+        x.state.handlePointerUp(x.pointer);
+        await vi.advanceTimersByTimeAsync(32);
+        expect(x.state.selectedText).toBe('Good ideas deserve careful attention.');
+        expect(x.state.showIndicator).toBe(true);
+        expect(x.state.snapshot.anchor).toMatchObject({left: 210, top: 180});
+        expect(x.translateText).not.toHaveBeenCalled();
+        x.state.openTooltip();
+        await Vue.nextTick();
+        expect(x.translateText).toHaveBeenCalledOnce();
+        x.state.hideAll();
+        expect(x.state.readSelectionSnapshot()).toBeNull();
+    });
+
+    it.each(['untrusted', 'touch', 'invalid coordinates', 'protected source'] as const)('does not use mouse fallback for %s', async reason => {
+        const x = prepare();
+        if (reason === 'untrusted') x.pointer.isTrusted = false;
+        if (reason === 'touch') x.pointer.pointerType = 'touch';
+        if (reason === 'invalid coordinates') x.pointer.clientX = Number.NaN;
+        if (reason === 'protected source') x.pointer.target!.setAttribute('translate', 'no');
+        x.state.handlePointerDown(x.pointer);
+        x.state.handlePointerUp(x.pointer);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(x.state.showIndicator).toBe(false);
+        expect(x.state.readSelectionSnapshot()).toBeNull();
+        expect(x.translateText).not.toHaveBeenCalled();
+    });
+
+    it('does not reuse a mouse anchor after keyboard selection changes the source boundaries', async () => {
+        const x = prepare();
+        x.state.handlePointerDown(x.pointer);
+        x.state.handlePointerUp(x.pointer);
+        await vi.advanceTimersByTimeAsync(32);
+        expect(x.state.showIndicator).toBe(true);
+        x.selected.range.startOffset = 1;
+        expect(x.state.readSelectionSnapshot()).toBeNull();
+        expect(x.translateText).not.toHaveBeenCalled();
+    });
+});
+
 describe('context menu selection ownership', () => {
     async function prepareMenu(browserTarget: SelectionBuildTarget = 'chrome') {
         const fixture = mountSelection(false, undefined, browserTarget);

@@ -82,6 +82,12 @@ GitHub 仓库列表和 Issue 列表同时保留旧容器与当前结构的保护
 
 生产构建后运行 `node scripts/run-selection-trigger-test.cjs --editable-selection-only --extension-dir .output/chrome-mv3 --playwright-root <Node包目录> --focus-safe-helper scripts/testing/focus-safe-browser.cjs --runtime-diagnostics <fluentread-browser-translation-test>/scripts/runtime-diagnostics.cjs --artifacts-dir <证据目录>`，在隔离 Edge profile 中检查 contenteditable 选区入口与右键 Range 归属；浏览器窗口后台可见且不抢焦点。
 
+## 飞书云文档划词
+
+`tests/fixtures/translation-pages/feishu-selection.html` 是合成的飞书分块编辑器夹具，不包含用户文档内容。`tests/selectionTranslatorCore.test.ts` 验证飞书、Lark Office 与 Lark Suite 的文档和 Wiki 路径在同一正文根内跨 Slate 编辑块读取选区，允许编辑器外壳自身的禁译标记，同时保留局部禁译、隐藏内容、控件、扩展 UI、正文外部和不同文档边界。普通网站的单编辑宿主规则保持原有行为。
+
+`tests/selectionTranslatorLifecycle.test.ts` 验证有真实文字与有效来源边界、但原生矩形为零的选区可使用可信鼠标松开位置显示入口，点击后才请求翻译；非可信事件、触摸、无效坐标、受保护来源与改选后的旧位置均不能走该回退。参考[沉浸式翻译公开发布代码](https://github.com/immersive-translate/immersive-translate/blob/main/dist/chrome/content_main.js)中显式选区与鼠标定位回退的处理方式，复用 FluentRead 原有 Range 校验、请求、浮层和生命周期，没有复制其实现代码。合成夹具与组件回归不代表已登录的真实飞书文档、在线翻译供应商或 Firefox 实机验收。
+
 ## 同目标语言跳过与统一语言判断
 
 `src/core/language` 是全文、悬浮、页面标题、划词、快捷键和共享翻译客户端判断“文本已是目标语言或排除语言”的唯一入口。`codes.ts` 统一两/三字母代码、ISO 639-2/B、宏语言成员、旧别名、地区、脚本与下划线写法，目标语言和排除语言共用同一比较；配置中的裸 `zh` 仍为简体，检测器给出的裸 `zh`/`cmn` 只表示书写体系未知，不匹配任何简繁目标。`identify.ts` 只以文本为缓存键给出与目标无关的结论，目标、排除列表或源语言变化都会重新比较。

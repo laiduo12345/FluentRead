@@ -1,9 +1,9 @@
 <!--
  * @file src/features/selection-translation/ui/SelectionTranslator.vue
- * 弹窗定位：自动卡片避开完整选区的纵向范围，优先放在其上方，必要时切换下方或按较大空间限高并保留滚动；仅在用户拖动或调整尺寸后固定手动位置。
+ * 弹窗定位：自动卡片避开完整选区的纵向范围，优先放在其上方，必要时切换下方或按较大空间限高并保留滚动；已核验原生选区无几何时，使用绑定相同来源边界的可信鼠标松开位置回退；仅在用户拖动或调整尺寸后固定手动位置。
  * 局部限高：整卡滚动跟随实际写入的 maxHeight，加载内容尚短时也保留后续滚动空间，不只依赖定位算法的可选限高结果。
  * 失败呈现：无结果时以简短原因、下一步提示和一个主操作展示；当前鉴权错误优先配置服务，重试按需展开，已有结果仍保留行内提示。
- * 来源提交：只允许完整位于同一局部编辑宿主的用户文本选区；右键目标与编辑宿主保持一致。翻译与词典异步结果交付前复核已克隆选区的正文、连接和适配器边界，不依赖原生高亮仍然存在；来源失效时撤销旧卡片，词书保存仍保留失联上下文回退。
+ * 来源提交：只允许完整位于同一局部编辑宿主或同一飞书文档正文的用户文本选区；右键目标与编辑宿主保持一致。翻译与词典异步结果交付前复核已克隆选区的正文、连接和适配器边界，不依赖原生高亮仍然存在；来源失效时撤销旧卡片，词书保存仍保留失联上下文回退。
  * 两点选取：默认关闭及文档适配器跳过快捷键冲突计算，快捷键开启单次起终点选择并放行开放 Shadow DOM 编辑区；复用原生选区与现有划词入口，完成后的首次选区读取保留同轮延迟滚动，随后恢复普通滚动收起，取消、编辑与卸载撤销首帧保护；短状态提示不捕获页面指针，未命中文字或起终点重合时说明可继续操作，配置变更和卸载释放控制器。
  * 通知布局：收藏与语音设置通知沿用安全可见视口订阅，触摸动作保留完整命中区；通知不增加独立监听或请求。
  * 极矮视口：同一卡片改为整卡滚动并收紧顶栏间距，保留输入与请求、手动几何和语音状态；Safari 键盘视口变化后仅在当前有限窗口内滚动卡片自身显露原聚焦输入，主动操作取消待处理显露；恢复尺寸后沿用原定位，不增加监听或计时器。
@@ -405,6 +405,10 @@ const vocabularySaveGate = new SelectionRequestTokenGate();
 let contentRequestGeneration = 0;
 let noticeTimer: number | null = null;
 let lastTrustedSelectionInteractionAt = 0;
+// 仅用于已核验原生选区的定位回退；不从鼠标位置、编辑器值或页面全文推导待翻译文字。
+let selectionPointerPosition: {x: number; y: number; source?: {
+  start: Node; startOffset: number; end: Node; endOffset: number; text: string;
+}} | null = null;
 const TRUSTED_SELECTION_INTERACTION_GRACE_MS = 1_500;
 // 原生选区句柄可能由系统处理而不向网页继续派发 pointer 事件；只给明确的触摸会话有限宽限。
 const TOUCH_SELECTION_GRACE_MS = 30_000;
@@ -605,8 +609,22 @@ function readSelectionSnapshot(): SelectionSnapshot | null {
     const text = parts.map(part => part.text).join('');
     if (!text || text.length > 4096) return null;
 
+    if (selectionPointerPosition) {
+      const source = selectionPointerPosition.source;
+      if (source && (source.start !== range.startContainer || source.startOffset !== range.startOffset
+        || source.end !== range.endContainer || source.endOffset !== range.endOffset || source.text !== nativeText)) {
+        selectionPointerPosition = null;
+      } else {
+        selectionPointerPosition.source = {start: range.startContainer, startOffset: range.startOffset,
+          end: range.endContainer, endOffset: range.endOffset, text: nativeText};
+      }
+    }
     const rects = Array.from(range.getClientRects()).map(toSelectionRect).filter(rect => rect.width > 0 || rect.height > 0);
     const visualRects = rects.length > 0 ? rects : [toSelectionRect(range.getBoundingClientRect())];
+    if (visualRects.every(rect => rect.width === 0 && rect.height === 0) && selectionPointerPosition) {
+      const {x, y} = selectionPointerPosition;
+      visualRects.splice(0, visualRects.length, {left: x, right: x + 1, top: y, bottom: y + 1, width: 1, height: 1});
+    }
     const isForward = selection.anchorNode === range.startContainer && selection.anchorOffset === range.startOffset;
     const anchor = chooseSelectionRect(visualRects, isForward);
     if (!anchor || (anchor.width === 0 && anchor.height === 0)) return null;
@@ -2155,6 +2173,7 @@ function hideAll(): void {
   resetPopupGeometry();
   // 保留关闭时的选区身份，避免按钮保留原生选区时 pointerup / selectionchange 再次打开卡片。
   dismissedSelection = snapshot.value ?? readSelectionSnapshot() ?? dismissedSelection;
+  selectionPointerPosition = null;
   lastTrustedSelectionInteractionAt = 0;
   touchSelectionActiveUntil = 0;
   cancelTouchSelectionRead();
@@ -2253,6 +2272,8 @@ function handlePointerUp(event: PointerEvent): void {
   const completedSelectionGesture = isSelecting;
   isSelecting = false;
   if (!completedSelectionGesture || event.button !== 0) return;
+  selectionPointerPosition = event.pointerType !== 'touch' && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+    ? {x: event.clientX, y: event.clientY} : null;
   if (event.pointerType === 'touch') scheduleTouchSelectionRead();
   else scheduleSelectionRead(matchesSelectionModifierOnPointer(event) || selectionShortcutHeld);
 }

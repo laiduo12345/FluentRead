@@ -1,4 +1,5 @@
 import {parseHTML} from 'linkedom';
+import {readFileSync} from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
     canUseBundledDictionaryFallback,
@@ -368,6 +369,62 @@ describe('explicit selections inside editable text', () => {
             : () => {throw new Error('host contains unavailable');}});
         const text = value.document.querySelector('i')!.firstChild!;
         expect(shouldIgnoreSelection(mockRange(text, text, {commonAncestor: text}), true)).toBe(false);
+    });
+});
+
+describe('Feishu document block selections', () => {
+    function fixture(url = 'https://tenant.feishu.cn/docx/fixture') {
+        const {document} = parseHTML(readFileSync(new URL('./fixtures/translation-pages/feishu-selection.html', import.meta.url), 'utf8'));
+        Object.defineProperty(document, 'URL', {value: url});
+        document.querySelectorAll('*').forEach(element => {
+            element.getClientRects = () => [{width: 80, height: 20}] as unknown as DOMRectList;
+        });
+        const first = document.querySelector('#first-text')!;
+        const second = document.querySelector('#second-text')!;
+        const root = document.querySelector('.bear-web-x-container')!;
+        const select = (start = first.firstChild!, end = second.firstChild!) => mockRange(start, end, {
+            commonAncestor: root, intersectingNodes: [...root.querySelectorAll('*')],
+        });
+        return {document, first, second, root, select};
+    }
+
+    it.each(['feishu.cn', 'larkoffice.com', 'larksuite.com'])('reads user-selected text across document blocks on %s without changing the editor', domain => {
+        const x = fixture(`https://tenant.${domain}/docx/fixture`);
+        const original = x.root.outerHTML;
+        expect(shouldIgnoreSelection(x.select())).toBe(true);
+        expect(shouldIgnoreSelection(x.select(), true)).toBe(false);
+        expect(shouldIgnoreSelection(x.select(x.first.firstChild!, x.first.firstChild!), true)).toBe(false);
+        expect(x.root.outerHTML).toBe(original);
+    });
+
+    it('supports readonly blocks and the page-root layout used without an outer container', () => {
+        const x = fixture('https://tenant.feishu.cn/wiki/fixture');
+        x.document.querySelectorAll('[contenteditable]').forEach(element => element.setAttribute('contenteditable', 'false'));
+        expect(shouldIgnoreSelection(x.select(), true)).toBe(false);
+        x.root.classList.remove('bear-web-x-container');
+        expect(shouldIgnoreSelection(x.select(), true)).toBe(false);
+    });
+
+    it.each(['https://example.test/docx/fixture', 'https://tenant.feishu.cn.evil.test/docx/fixture',
+        'https://tenant.feishu.cn/messenger/fixture', 'http://tenant.feishu.cn/docx/fixture'])('does not extend the document exception to %s', url => {
+        expect(shouldIgnoreSelection(fixture(url).select(), true)).toBe(true);
+    });
+
+    it.each(['button', 'input', 'textarea', 'span aria-hidden="true"', 'span data-fluent-read-ui="true"',
+        'span class="notranslate"', 'span translate="no"', 'span data-notranslate="true"'])('retains protection of selected %s inside a document', attributes => {
+        const x = fixture();
+        const tag = attributes.split(' ')[0];
+        x.second.innerHTML = `<${attributes}>Protected content</${tag}>`;
+        x.second.firstElementChild!.getClientRects = () => [{width: 80, height: 20}] as unknown as DOMRectList;
+        expect(shouldIgnoreSelection(x.select(), true)).toBe(true);
+    });
+
+    it('rejects selections leaving the document or entering a separate document container', () => {
+        const x = fixture();
+        expect(shouldIgnoreSelection(x.select(x.first.firstChild!, x.document.querySelector('#outside-text')!.firstChild!), true)).toBe(true);
+        const other = x.root.cloneNode(true) as Element;
+        x.document.body.appendChild(other);
+        expect(shouldIgnoreSelection(x.select(x.first.firstChild!, other.querySelector('#second-text')!.firstChild!), true)).toBe(true);
     });
 });
 
